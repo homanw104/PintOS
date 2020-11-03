@@ -231,7 +231,7 @@ init_grammar (void)
   daGrammar[26] = bad_place;
   daGLoc[26] = bad_placeLoc;
 }
-
+
 #include <ctype.h>
 #include <debug.h>
 #include <random.h>
