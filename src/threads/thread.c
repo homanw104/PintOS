@@ -579,6 +579,16 @@ allocate_tid (void)
   return tid;
 }
 
+/* Key to test_alarm_priority.
+   Compares the value of two list elements A and B, given
+   auxiliary data AUX. Returns true if A is less than B, or
+   false if A is greater than or equal to B. */
+void
+thread_cmp_priority (const struct list_elem *a, const struct list_elem *b, void *aux)
+{
+  
+}
+
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
