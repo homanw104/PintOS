@@ -17,7 +17,8 @@ $ sudo apt install buid-essential
 $ sudo apt install xorg-dev
 $ sudo apt install bison
 $ sudo apt install libgtk2.0-dev
-$ sudo apt install libc6:i386 libgcc1:i386 gcc-4.6-base:i386 libstdc++5:i386 libstdc++6:i386
+$ sudo apt install libc6:i386 libgcc1:i386
+$ sudo apt install gcc-4.6-base:i386 libstdc++5:i386 libstdc++6:i386
 $ sudo apt install libncurses5:i386
 $ sudo apt install g++-multilib
 ```
@@ -503,12 +504,303 @@ struct lock
 
 ![thread_set_priority](assets/markdown-img-paste-20210118023453100.png)
 
-至此，修改了 `thread.c` 中的优先级调度程序，已经可以通过部分和优先级有关的测试了：
+至此，修改了 `thread.c` 中的优先级调度程序，已经可以通过部分和优先级有关的测试：
 
 ```shell
+pass tests/threads/priority-fifo
+pass tests/threads/priority-preempt
 ```
 
+接下来对于优先级捐赠问题，首先需要 `thread` 定义中加入以下数据结构：
+
+![struct_thread](assets/markdown-img-paste-20210118032311220.png)
+
+然后为 `lock` 的定义加入以下两个数据结构。前者是当前线程在信号量队列中位置（在原始的队列中，当
+前线程一定位于队列的首部），后者则是表示该锁的信号量队列中线程的最高优先级：
+
+![struct_lock](assets/markdown-img-paste-20210118032703823.png)
+
+为了让修改的数据结构能够得到初始化，修改线程的初始化函数 `init_thread` 和锁的初始化函数
+`lock_init` ：
+
+![init_thread](assets/markdown-img-paste-20210118033025229.png)
+![lock_init](assets/markdown-img-paste-20210118033250772.png)
+
+由于全程都在涉及关于锁的操作，所以先对获取锁的函数 `lock_aquire()` 进行修改。也就是要让每一
+个锁在获得的时候首先检测比较想要获得这个锁的线程的优先级是否比锁内存储的 `max_priority` 大，
+如果更大，则需要将这个锁内存储的 `max_priority` 设置为最大的优先级，并且对线程进行优先级捐赠
+操作：
+
+![lock_aquire](assets/markdown-img-paste-20210118033647482.png)
+
+对应的在 `thread.c` 中实现 `thread_donate_priority()` 和 `thread_hold_the_lock()`
+函数。其中 `thread_donate_priority` 需要自行实现一个对 `t` 进行优先级更新的函数，因为被捐
+赠优先级的线程不一定是正在运行的线程，之前程序自带的 `thread_set_priority()` 只能满足更新当
+前线程的优先级，所以需要修改。而 `thread_hold_the_lock()` 则是让线程获得当前锁。由于如果线
+程拥有一个锁，那么线程的优先级一定要是拥有这个锁的队列中的最大值，所以如果锁的优先级大于线程的优
+先级，需要相应地更新线程的优先级，然后把这个锁加入到线程拥有的锁的队列中。这两个函数的代码如下：
+
+```c
+/* Key to 1.2 - Let thread hold a lock */
+void thread_hold_the_lock (struct lock *lock)
+{
+  enum intr_level old_level = intr_disable();
+  list_insert_ordered (&thread_current()->locks,
+                       &lock->elem, lock_cmp_priority, NULL);
+
+  if (lock->max_priority > thread_current ()->priority)
+    {
+      thread_current ()->priority = lock->max_priority;
+      thread_yield ();
+    }
+
+  intr_set_level (old_level);
+}
+
+/* Key to 1.2 - Donate current priority to thread t. */
+void thread_donate_priority (struct thread *t)
+{
+  enum intr_level old_level = intr_disable ();
+  thread_update_priority (t);
+
+  if (t->status == THREAD_READY)
+    {
+      list_remove (&t->elem);
+      list_insert_ordered (&ready_list, &t->elem, compare_priority, NULL);
+    }
+  intr_set_level (old_level);
+}
+```
+
+接下来对于 `thread_update_priority()` 函数编写如下。当前已经有的修改函数
+`thread_set_priority()` 只能用于修改当前正在运行的优先级。不过这个函数可以修改一下用于更新
+当前运行线程的 `base_priority` 并根据新的优先级来判断是否需要 yield 线程。在这之前，先完善
+修改当前线程优先级的函数 `thread_set_priority()` 如下：
+
+![thread_set_priority](assets/markdown-img-paste-2021011803514700.png)
+
+此后再编写一个 `thread_update_priority()` 函数来更新当前正在运行的线程的优先级。使用这个函
+数来应对多个线程同时在对一个线程进行优先级捐赠的情况。为了使设置的优先级为锁的最大值，需要对某个
+线程所获得的锁进行排序，然后取出队列中最前的元素作为当前线程的新优先级。
+
+```c
+/* Key to 1.2 - Update priority. */
+void thread_update_priority (struct thread *t)
+{
+	enum intr_level old_level = intr_disable ();
+	int max_priority = t->base_priority;
+	int lock_priority;
+
+	if (!list_empty (&t->locks))
+    {
+  		list_sort (&t->locks, lock_cmp_priority, NULL);
+  		lock_priority = list_entry (list_front (&t->locks),
+                                  struct lock, elem)->max_priority;
+  		if (lock_priority > max_priority)
+  			max_priority = lock_priority;
+  	}
+
+	t->priority = max_priority;
+	intr_set_level (old_level);
+}
+```
+
+为了实现关于锁的排序函数，还需实现 `lock_cmp_priority` 函数如下：
+
+```c
+/* Key to 1.2 - Compare priority in locks. */
+bool lock_cmp_priority (const struct list_elem *a,
+                        const struct list_elem *b, void *aux UNUSED)
+{
+  int max_a = list_entry (a, struct lock, elem)->max_priority;
+  int max_b = list_entry (b, struct lock, elem)->max_priority;
+  return max_a > max_b;
+}
+```
+
+以上实现了获取锁的逻辑。而对于锁的释放，需要先把锁从线程的 `lock` 队列中删除，然后将锁设置为不
+被任何线程占用，最后再进行信号量的 V 操作。这里编写一个 `thread_remove_lock()` 函数来实现：
+
+```c
+/* Key to 1.2 - Remove lock. */
+void thread_remove_lock(struct lock *lock)
+{
+	enum intr_level old_level = intr_disable ();
+	list_remove (&lock->elem);
+	thread_update_priority (thread_current ());
+	intr_set_level (old_level);
+}
+```
+
+相应地，在进行 `lock_release()` 的时候调用该函数：
+
+![lock_release](assets/markdown-img-paste-2021011804012060.png)
+
+最后将剩下的队列修改为优先级队列。首先修改 `synch.c` 中的 `cond_signal()` 函数：
+
+![cond_signal](assets/markdown-img-paste-20210118042050983.png)
+
+增加相应的排序函数 `cond_sema_cmp_priority()` ：
+
+```c
+/* Key to 1.2 */
+bool cond_sema_cmp_priority (const struct list_elem *a,
+                             const struct list_elem *b, void *aux UNUSED)
+{
+	struct semaphore_elem *sa = list_entry (a, struct semaphore_elem, elem);
+	struct semaphore_elem *sb = list_entry (b, struct semaphore_elem, elem);
+  int priority_a = list_entry (list_front (&sa->semaphore.waiters),
+                               struct thread, elem)->priority;
+  int priority_b = list_entry (list_front (&sb->semaphore.waiters),
+                               struct thread, elem)->priority;
+	return priority_a > priority_b;
+}
+```
+
+再修改 `waiters` 为优先级队列。对 `sema_down` 和 `sema_up` 修改如下：
+
+![sema_down](assets/markdown-img-paste-20210118041542427.png)
+![sema_up](assets/markdown-img-paste-20210118041606246.png)
+
+记得在 `threads.h` 与 `synch.h` 头文件中声明另外添加的函数：
+
+```c
+/* threads.h */
+void thread_check_blocked(struct thread *, void *);
+bool compare_priority(const struct list_elem *,
+                      const struct list_elem *, void *);
+bool lock_cmp_priority (const struct list_elem *,
+                        const struct list_elem *, void *);
+void thread_hold_the_lock (struct lock *);
+void thread_remove_lock(struct lock *);
+void thread_donate_priority (struct thread *);
+void thread_update_priority (struct thread *);
+```
+
+```c
+/* synch.h */
+bool cond_sema_cmp_priority (const struct list_elem *,
+                             const struct list_elem *, void *);
+```
+
+完成以上步骤以后， priority 部分的测试可以通过，优先级调度部分的修改完成。
+
+```shell
+pass tests/threads/priority-change
+pass tests/threads/priority-donate-one
+pass tests/threads/priority-donate-multiple
+pass tests/threads/priority-donate-multiple2
+pass tests/threads/priority-donate-nest
+pass tests/threads/priority-donate-sema
+pass tests/threads/priority-donate-lower
+pass tests/threads/priority-fifo
+pass tests/threads/priority-preempt
+pass tests/threads/priority-sema
+pass tests/threads/priority-condvar
+pass tests/threads/priority-donate-chain
+```
+
+
+
 ### Mission 3: Advanced Scheduler - 高级调度
+
+在这个部分中，需要自行实现类似于BSD调度程序的多级反馈队列调度程序，以减少在系统上运行作业的平均
+响应时间。
+
+与优先级调度调度程序一样，高级调度程序同样基于线程的优先级来调度线程。但是高级调度程序
+不会执行优先级捐赠。必须编写必要的代码，以允许在 Pintos 启动时选择调度算法策略。默认情况下，优
+先级调度程序必须处于活动状态，但必须能够使用 `-mlfqs` 内核选项选择 4.4BSD 调度程序。在
+`main()` 函数中 `parse_options()` 解析选项时，传递此选项会将 `threads/thread.h` 中声明
+的 `thread_mlfqs` 设置为 `true` 。所以为了完成这个任务，在 Mission 2 中的关于优先级捐赠的
+代码需要加入 `if (!thread_mlpfs)` 进行判断，暂时关闭优先级调度的代码。
+
+启用 BSD 调度程序后，线程不再直接控制自己的优先级。应忽略 `thread_create()` 的优先级参数，
+以及对 `thread_set_priority()` 的任何调用，并且 `thread_get_priority()` 应返回调度程序
+设置的线程的当前优先级。高级调度程序不会在以后的任何项目中使用。而对于每个线程的优先级的更新，
+应当使用官方文档附录中的算法实现。
+
+通用调度程序的目标是平衡线程的不同调度需求。执行大量 I/O 的线程需要快速响应时间以保持输入和输出
+设备忙，但需要很少的CPU时间。另一方面，绑定计算的线程需要花费大量 CPU 时间来完成其工作，但不需
+要快速响应时间。其他线程介于两者之间， I/O 周期被计算周期打断，因此需求随时间变化。精心设计的
+调度程序通常可以同时满足具有所有这些要求的线程。
+
+我们必须实现附录 B 中描述的调度程序。调度程序类似于 [McKusick] 中描述的调度程序，是多级反馈
+队列调度程序的一个示例。这种类型的调度程序维护几个可立即运行的线程队列，其中每个队列包含具有不同
+优先级的线程。在任何给定时间，调度程序从最高优先级的非空队列中选择一个线程。如果最高优先级队列包
+含多个线程，则它们以“循环”顺序运行。
+
+调度程序的多个方面需要在一定数量的计时器滴答之后更新数据。在每种情况下，这些更新应该在任何普通
+内核线程有机会运行之前发生，这样内核线程就不可能看到新增的 `timer_ticks()` 值而是旧的调度程
+序数据值。
+
+首先需要关注的是对于每个线程的 `nice` 值，即处理器亲和度。 `nice` 值为 0 不会影响线程优先级。
+ `nice` 值从 1 至 20 ，会降低线程的优先级，并导致它放弃一些原本会收到的 CPU 时间。另一种情
+ 况， `nice` 值从 -20 到 -1 ，往往会从其他线程中抢占CPU时间。每 4 个时间周期进行算出线程的
+ 新优先级。在 `thread.c` 中，已经预留了两个需要填补的函数：
+
+```c
+int thread_get_nice (void);
+void thread_set_nice (int new_nice);
+```
+
+对于公式中的 `recent_cpu` ，需每个 `timer_tick` 都计算一次。我们希望 `recent_cpu` 可以
+表征每个进程“最近”收到多少CPU运行时间。此外，作为一种改进，最新收到的 CPU 时间应该比其之前的
+CPU 时间权重更大。一种方法是使用 n 个元素的数组来跟踪在最后 n 秒的每一个中接收的CPU时间。然而
+这种方法每线程需要 O(n) 空间,并且每次计算新加权平均值需要 O(n) 时间。相反，实验手册建议使用
+指数加权平均数计算。
+
+在创建的第一个线程中, `recent_cpu` 的初始值为 0 ，或者在其他新线程中为其父进程值。每次发生
+定时器中断时，除非空闲线程正在运行，否则 `recent_cpu` 仅对正在运行的线程递增 1 。此外，每秒
+一次，使用以下公式为每个线程（无论是运行，准备还是阻塞）重新计算 `recent_cpu` 的值，其中
+`load avg` 是准备运行的线程数的移动平均值。如果 `load avg` 为 1 ，表示单个线程正在竞争
+CPU，那么 `recent_cpu` 的当前值在 log(2/3, 0.1) ≈ 6 秒内衰减到原值的 0.1。如果
+`load_avg` 为 2 ，则衰减到原值的 0.1 需要 log(3/4, 0.1) ≈ 8 秒。结果是 `recent_cpu`
+估计了线程“最近”收到的 CPU 时间量，衰减率与竞争 CPU 的线程数成反比。
+
+一些测试所做的假设要求在系统计数器每达到一秒完全重新计算 `recent_cpu` ，即条件
+`timer_ticks () % TIMER_FREQ == 0` 成立。
+
+对于具有负 `nice` 值的线程， `recent_cpu` 的值可能为负，所以不应当假设 `recent_cpu` 的值
+一直大于 0 。此外，还需需要考虑此公式中的计算顺序。先计算 `recent_cpu` 的系数，然后再做乘法，
+否则可能会产生溢出。
+
+必须实现在 `threads/thread.c` 中的 `thread_get_recent_cpu()` 函数：
+
+```c
+int thread_get_recent_cpu (void);
+```
+
+而为了计算 `recent_cpu` ，又需要计算 `load_avg` ，即系统的平均负载量。它估计在过去一分钟内，
+在准备队列中的平均线程数。像 `recent_cpu` 一样，它也是指数加权的平均值。与 `priority` 和
+`recent_cpu` 不同， `load_avg` 是系统范围的，而不是特定于线程的。在系统启动时，它被初始化
+为 0 。此后每个 `timer_ticker` 更新一次。
+
+`ready_thread` 是在更新时运行或准备运行的线程数（不包括空闲线程）。
+
+有些测试假设当计时器达到 1 秒倍数时，即当 `timer_ticks () % TIMER_FREQ == 0` 时，必须要
+重新更新 `load_avg` ，而不是在其它时间。
+
+必须实现位于 `threads/thread.c` 中的函数：
+
+```c
+int thread_get_load_avg (void);
+```
+
+最后，为了计算出 `recent_cpu` 值和 `load_avg` 值，需要我们自行实现定点数的运算。
+
+根据官方实验手册的知道，实现定点运算基本思想是将定点数运算转换成整数的运算。将整数的最右边的几位
+视为表示分数。我们可以将带符号的 32 位整数的最低 14 位指定为小数位，这样整数 x 代表实数
+x/214 。叫做 17.14 定点数，最大能够表示 (231-1)/214 ，近似于 131071.999 。
+
+假设我们使用 p.q 的定点数格式，并且设 f = 2q 。根据上面的定义，我们可以通过乘以 f 将整数或实
+数转换为 p.q 格式。例如，基于 17.14 格式的定点数转换 59/60 ， (59/60)214 = 16110。将定点
+数转换为整数则除以 f 。
+
+实验手册提供了总结了如何在 C 中实现定点的算术运算。在表中，x 和 y 是定点数， n 是整数，定点数
+是带符号的 p.q 格式，其中 p + q = 31， f 的值应当为 1 << q 。
+
+首先,新的算法需要用到之前的内核中不支持的定点数运算。为了实现定点数的运算,
+在 thread 目录下新建一个 fixed_point.h 并编写如下宏:
 
 ### Note
 

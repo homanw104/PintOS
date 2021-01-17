@@ -94,6 +94,11 @@ struct thread
     struct list_elem elem;              /* List element. */
     uint16_t blocked_ticks;             /* Blocked ticks. */
 
+    /* Key to 1.2 */
+    int base_priority;                  /* Base priority. */
+    struct list locks;	                /* Locks which the thread is holding. */
+    struct lock *lock_waiting;          /* The lock thread's waiting for. */
+
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
@@ -140,8 +145,14 @@ int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
 /* Key */
-void thread_check_blocked(struct thread *, void * aux UNUSED);
+void thread_check_blocked(struct thread *, void *);
 bool compare_priority(const struct list_elem *,
                       const struct list_elem *, void *);
+bool lock_cmp_priority (const struct list_elem *,
+                        const struct list_elem *, void *);
+void thread_hold_the_lock (struct lock *);
+void thread_remove_lock(struct lock *);
+void thread_donate_priority (struct thread *);
+void thread_update_priority (struct thread *);
 
 #endif /* threads/thread.h */
