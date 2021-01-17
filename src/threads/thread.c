@@ -183,6 +183,9 @@ thread_create (const char *name, int priority,
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
 
+  /* Set blocked_ticks to 0 */
+  t->blocked_ticks = 0;
+
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
   kf->eip = NULL;
@@ -237,7 +240,13 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+
+  /* Key */
+  list_insert_ordered(&ready_list, &t->elem,
+                      (list_less_func *)&compare_priority, NULL);
+  /* Old */
+  // list_push_back (&ready_list, &t->elem);
+
   t->status = THREAD_READY;
   intr_set_level (old_level);
 }
@@ -308,7 +317,12 @@ thread_yield (void)
 
   old_level = intr_disable ();
   if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
+    /* Key - Put elements ordered. */
+    list_insert_ordered(&ready_list, &cur->elem,
+                        (list_less_func *) &compare_priority, NULL);
+    /* Old */
+    // list_push_back (&ready_list, &cur->elem);
+
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -335,7 +349,14 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority) 
 {
-  thread_current ()->priority = new_priority;
+  /* Key */
+  int old_priority = thread_current()->priority;
+  thread_current()->priority = new_priority;
+  if (new_priority < old_priority)
+    thread_yield();
+
+  /* Old */
+  // thread_current ()->priority = new_priority;
 }
 
 /* Returns the current thread's priority. */
@@ -465,7 +486,14 @@ init_thread (struct thread *t, const char *name, int priority)
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
-  list_push_back (&all_list, &t->allelem);
+
+  /* Key */
+  list_insert_ordered(&all_list, &t->allelem,
+                      (list_less_func *)&compare_priority, NULL);
+
+  /* Old */
+  // list_push_back (&all_list, &t->allelem);
+  
   intr_set_level (old_level);
 }
 
@@ -579,16 +607,27 @@ allocate_tid (void)
   return tid;
 }
 
-/* Key to test_alarm_priority.
-   Compares the value of two list elements A and B, given
-   auxiliary data AUX. Returns true if A is less than B, or
-   false if A is greater than or equal to B. */
-void
-thread_cmp_priority (const struct list_elem *a, const struct list_elem *b, void *aux)
-{
-  
-}
-
-/* Offset of `stack' member within `struct thread'.
+/* Key - Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
+
+/* Key - Check if the thread should be unblocked as it's 
+   blocked ticks reached to 0. */
+void thread_check_blocked (struct thread *t, void *aux UNUSED)
+{
+  if (t->status == THREAD_BLOCKED && t->blocked_ticks > 0)
+  {
+	  t->blocked_ticks--;
+	  if (t->blocked_ticks == 0)
+		  thread_unblock(t);
+  }
+}
+
+/* Key - Compare priority. */
+bool compare_priority(const struct list_elem *a, const struct list_elem *b,
+                      void *aux UNUSED)
+{
+	int pa = list_entry(a, struct thread, elem)->priority;
+	int pb = list_entry(b, struct thread, elem)->priority;
+	return pa > pb;
+}
