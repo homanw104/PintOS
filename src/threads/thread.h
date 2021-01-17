@@ -5,6 +5,8 @@
 #include <list.h>
 #include <stdint.h>
 
+#include "fixed_point.h"
+
 /* States in a thread's life cycle. */
 enum thread_status
   {
@@ -99,6 +101,10 @@ struct thread
     struct list locks;	                /* Locks which the thread is holding. */
     struct lock *lock_waiting;          /* The lock thread's waiting for. */
 
+    /* Key to 1.3 */
+    int nice;                           /* Niceness. */
+    fixed_t recent_cpu;
+
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
@@ -144,7 +150,7 @@ void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
-/* Key */
+/* Key to 1.2 */
 void thread_check_blocked(struct thread *, void *);
 bool compare_priority(const struct list_elem *,
                       const struct list_elem *, void *);
@@ -154,5 +160,10 @@ void thread_hold_the_lock (struct lock *);
 void thread_remove_lock(struct lock *);
 void thread_donate_priority (struct thread *);
 void thread_update_priority (struct thread *);
+
+/* Key to 1.3 */
+void thread_mlfqs_increase_recent_cpu_by_one (void);
+void thread_mlfqs_update_load_avg_and_recent_cpu (void);
+void thread_mlfqs_update_priority (struct thread *);
 
 #endif /* threads/thread.h */
