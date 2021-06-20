@@ -1258,7 +1258,7 @@ free(argv);
 不过在做完修改步骤之后，执行检查的时候会发现所有测试仍然会导致内核 `PANIC` 。
 
 分析在 Project 1 中做过的修改可以得知，这是由与之前在实现优先级调度的时候，在每一个 `sema_up`
-操作之后都进行了 `thread_yield()` 导致的。所以这里可以考虑修改 `synch.c` 中的` sema_up`
+操作之后都进行了 `thread_yield()` 导致的。所以这里可以考虑修改 `synch.c` 中的 `sema_up`
 函数：
 
 ```c
@@ -1298,10 +1298,7 @@ struct lock filesys_lock
 make SIMULATOR=--bochs check
 ```
 
-可以发现参数传递部分的测试已经通过：
-
-```
-```
+可以发现参数传递部分的测试已经通过
 
 
 
